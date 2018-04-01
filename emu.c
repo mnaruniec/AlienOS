@@ -19,6 +19,7 @@
 
 
 void child(const char *prog, pid_t emu_pid) {
+    // TODO przeczytac man execve
     if (prctl(PR_SET_PDEATHSIG, SIGKILL)) {
         perror("prctl");
         exit(127);
