@@ -13,39 +13,39 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <syscall.h>
+#include <ncurses.h>
 #include "alienos.h"
 
 #define SYS_getrandom 318
 
 
 void child(const char *prog, pid_t emu_pid) {
-    // TODO przeczytac man execve
     if (prctl(PR_SET_PDEATHSIG, SIGKILL)) {
-        perror("prctl");
+        //perror("prctl");
         exit(127);
     }
 
     // checks if parent died before we set its death signal
     if (getppid() != emu_pid) {
-        printf("emu process died, exiting\n");
+        //printf("emu process died, exiting\n");
         exit(127);
     }
 
     // sets parent as the tracer (does not stop the tracee)
     if(ptrace(PTRACE_TRACEME, 0, 0, 0)) {
-        perror("ptrace(PTRACE_TRACEME)");
+        //perror("ptrace(PTRACE_TRACEME)");
         exit(127);
     }
 
     // allows parent to set ptrace options before execve happens
     if(raise(SIGSTOP)) {
-        printf("raise(SIGSTOP)\n");
+        //printf("raise(SIGSTOP)\n");
         exit(127);
     }
 
     // executes the program from the file
     if(execve(prog, NULL, NULL)) {
-        perror("execv()");
+        //perror("execv()");
         exit(127);
     }
 }
@@ -53,7 +53,7 @@ void child(const char *prog, pid_t emu_pid) {
 void do_return(pid_t prog_pid, struct user_regs_struct regs_struct, uint64_t return_value) {
     regs_struct.rax = return_value;
     if(ptrace(PTRACE_SETREGS, prog_pid, 0, &regs_struct)) {
-        perror("PTRACE_SETREGS");
+        //perror("PTRACE_SETREGS");
         exit(127);
     }
 }
@@ -62,30 +62,69 @@ void do_return(pid_t prog_pid, struct user_regs_struct regs_struct, uint64_t ret
 uint32_t do_getrand() {
     uint32_t return_value;
     if(syscall(SYS_getrandom, &return_value, 4, 0) != 4) {
-        perror("getrandom");
+        //perror("getrandom");
         exit(127);
     }
-    printf("[syscall] getrand, zwracam %d\n", return_value);
+    //printf("[syscall] getrand, zwracam %d\n", return_value);
     return return_value;
 }
 
 int do_getkey() {
-    printf("[syscall] getkey, zwracam 0x83(strzalka w prawo)\n");
-    return 0x83;
+    //printf("[syscall] getkey, zwracam 0x83(strzalka w prawo)\n");
+    int key;
+    while(1) {
+        switch(key = getch()) {
+            case ERR:
+                exit(127);
+            case KEY_RIGHT:
+                return ALIENOS_KEY_RIGHT;
+            case KEY_LEFT:
+                return ALIENOS_KEY_LEFT;
+            case KEY_UP:
+                return ALIENOS_KEY_UP;
+            case KEY_DOWN:
+                return ALIENOS_KEY_DOWN;
+            case KEY_ENTER:
+                return ALIENOS_KEY_ENTER;
+            default:
+                if(key >= ALIENOS_ASCII_LOWEST && key <= ALIENOS_ASCII_HIGHEST) {
+                    return key;
+                }
+        }
+
+    }
+}
+
+int getcolor(uint16_t achar) {
+    static int colors[16] = {1}; // TODO
+    int index = (achar >> 8) & 0xf;
+    return colors[index];
+}
+
+inline void check_coords(int x, int y) {
+    if(x < 0 || x >= ALIENOS_COLUMNS || y < 0 || y >= ALIENOS_ROWS) {
+        exit(127);
+    }
 }
 
 void do_print(int x, int y, uint16_t *chars, int n) {
-    printf("[syscall] print z parametrami: x = %d, y = %d, chars = %p, n = %d\n", x, y, chars, n);
+    //printw("[syscall] print z parametrami: x = %d, y = %d, chars = %p, n = %d\n", x, y, chars, n);
+    //refresh();
 }
 
 void do_setcursor(int x, int y) {
-    printf("[syscall] setcursor z parametrami: x = %d, y = %d\n", x, y);
+    check_coords(x, y);
+    if(move(y, x) == ERR) {
+        exit(127);
+    }
+    //printw("[syscall] setcursor z parametrami: x = %d, y = %d\n", x, y);
+    refresh();
 }
 
 bool do_syscall(pid_t prog_pid, int *exit_code) {
     struct user_regs_struct regs_struct;
     if(ptrace(PTRACE_GETREGS, prog_pid, 0, &regs_struct)) {
-        perror("PTRACE_GETREGS");
+        //perror("PTRACE_GETREGS");
         exit(127);
     }
 
@@ -109,13 +148,14 @@ bool do_syscall(pid_t prog_pid, int *exit_code) {
             do_return(prog_pid, regs_struct, return_value);
             break;
         case 3:
-            do_print((int)arg0, (int)arg1, (uint16_t *)arg2, (int)arg3);
+            // TODO copy from child
+            //do_print((int)arg0, (int)arg1, (uint16_t *)arg2, (int)arg3);
             break;
         case 4:
             do_setcursor((int)arg0, (int)arg1);
             break;
         default:
-            printf("invalid syscall invoked: %lld\n", regs_struct.orig_rax);
+            //printf("invalid syscall invoked: %lld\n", regs_struct.orig_rax);
             exit(127);
     }
     return false;
@@ -133,36 +173,36 @@ void parent(pid_t prog_pid) {
     int exit_code;
 
     if(waitpid(prog_pid, &wstatus, 0) == -1) {
-        perror("first waitpid");
+        //perror("first waitpid");
         exit(127);
     }
     if(!WIFSTOPPED(wstatus)) {
-        printf("first WIFSTOPPED\n");
+        //printf("first WIFSTOPPED\n");
         exit(127);
     }
     if(ptrace(PTRACE_SETOPTIONS, prog_pid, 0, PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACESYSGOOD)) {
-        perror("PTRACE_SETOPTIONS");
+        //perror("PTRACE_SETOPTIONS");
         exit(127);
     }
     wsignal = WSTOPSIG(wstatus);
     if(wsignal != SIGSTOP) {
-        printf("child received unexpected signal\n");
+        //printf("child received unexpected signal\n");
         exit(127);
     }
 
     while(1) {
         if(ptrace(PTRACE_CONT, prog_pid, 0, 0)) {
-            perror("PTRACE_CONT");
+            //perror("PTRACE_CONT");
             exit(127);
         }
 
         if(waitpid(prog_pid, &wstatus, 0) == -1) {
-            perror("preexecve waitpid");
+            //perror("preexecve waitpid");
             exit(127);
         }
 
         if(!WIFSTOPPED(wstatus)) {
-            printf("first WIFSTOPPED\n");
+            //printf("first WIFSTOPPED\n");
             exit(127);
         }
         wsignal = WSTOPSIG(wstatus);
@@ -171,17 +211,17 @@ void parent(pid_t prog_pid) {
         }
         if(wsignal == SIGTRAP) {
             if(wstatus >> 8 == (SIGTRAP | PTRACE_EVENT_EXEC << 8)) {
-                printf("execve caught\n");
+                //printf("execve caught\n");
                 break;
             }
             if(wstatus >> 8 == (SIGTRAP | PTRACE_EVENT_EXIT << 8)) {
-                printf("child exited unexpectedly\n");
+                //printf("child exited unexpectedly\n");
                 exit(127);
             }
-            printf("received unexpected SIGTRAP\n");
+            //printf("received unexpected SIGTRAP\n");
             exit(127);
         }
-        printf("received unexpected signal: %s\n", strsignal(wsignal));
+        //printf("received unexpected signal: %s\n", strsignal(wsignal));
         exit(127);
     }
 
@@ -189,17 +229,17 @@ void parent(pid_t prog_pid) {
 
     while(!child_exited) {
         if(ptrace(PTRACE_SYSEMU, prog_pid, 0, 0)) {
-            perror("PTRACE_SYSEMU");
+            //perror("PTRACE_SYSEMU");
             exit(127);
         }
 
         if(waitpid(prog_pid, &wstatus, 0) == -1) {
-            perror("postexecve waitpid");
+            //perror("postexecve waitpid");
             exit(127);
         }
 
         if(!WIFSTOPPED(wstatus)) {
-            printf("first WIFSTOPPED\n");
+            //printf("first WIFSTOPPED\n");
             exit(127);
         }
         wsignal = WSTOPSIG(wstatus);
@@ -209,11 +249,11 @@ void parent(pid_t prog_pid) {
         }
 
         if(wstatus >> 8 == (SIGTRAP | PTRACE_EVENT_EXIT << 8)) {
-            printf("child exited unexpectedly\n");
+            //printf("child exited unexpectedly\n");
             exit(127);
         }
 
-        printf("received unexpected signal: %s\n", strsignal(wsignal));
+        //printf("received unexpected signal: %s\n", strsignal(wsignal));
         exit(127);
     }
 
@@ -222,9 +262,15 @@ void parent(pid_t prog_pid) {
 }
 
 int main(int argc, char **argv) {
-
+    initscr();
+    cbreak();
+    noecho();
+    keypad(stdscr, TRUE);
+    wresize(stdscr, ALIENOS_ROWS, ALIENOS_COLUMNS);
+    printw("Hello!");
+    refresh();
     if(argc < 2) {
-        printf("Usage: emu program [program_parameters]\n");
+        //printf("Usage: emu program [program_parameters]\n");
         return 127;
     }
 
@@ -234,7 +280,7 @@ int main(int argc, char **argv) {
 
     switch(prog_pid = fork()) {
         case -1:
-            perror("fork()");
+            //perror("fork()");
             return 127;
         case 0:
             child(prog, emu_pid);
