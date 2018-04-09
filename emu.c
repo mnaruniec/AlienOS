@@ -17,40 +17,109 @@
 #include <ncurses.h>
 #include <fcntl.h>
 #include <elf.h>
+#include <limits.h>
 #include "alienos.h"
 
 #define SYS_getrandom 318
 
+// Returns maximum number of parameters or -1, fills params_addr
+int find_params(const char *path, uint64_t *params_addr) {
+    int fd;
+    Elf64_Half i;
+    Elf64_Ehdr ehdr_struct;
+    Elf64_Off phdr_off;
+    Elf64_Half phdr_size;
+    Elf64_Half phdr_count;
+    Elf64_Phdr phdr_struct;
+    uint64_t params_count = 0;
+    bool params_found = false;
 
-void child(const char *prog, pid_t emu_pid) {
+    if((fd = open(path, O_LARGEFILE | O_RDONLY)) == -1) {
+        goto fail_no_close;
+    }
+
+    if(pread64(fd, &ehdr_struct, sizeof(Elf64_Ehdr), 0) != sizeof(Elf64_Ehdr)) {
+        perror("pread(prog_source)");
+        goto fail;
+    }
+
+    phdr_off = ehdr_struct.e_phoff;
+    phdr_size = ehdr_struct.e_phentsize;
+    phdr_count = ehdr_struct.e_phnum;
+
+    for(i = 0; i < phdr_count; ++i, phdr_off += phdr_size) {
+        if(pread64(fd, &phdr_struct, sizeof(Elf64_Phdr), phdr_off) != sizeof(Elf64_Phdr)) {
+            perror("pread(prog_source)");
+            goto fail;
+        }
+
+        if(phdr_struct.p_type == ALIENOS_PT_PARAMS) {
+            if(params_found) { // duplicate PT_PARAMS segment
+                return -1;
+            }
+            params_found = true;
+            *params_addr = phdr_struct.p_paddr;
+            params_count = phdr_struct.p_memsz;
+            if(params_count % 4) {
+                goto fail;
+            }
+            params_count /= 4;
+        }
+    }
+
+    if(close(fd)) {
+        perror("close(prog_source)");
+        goto fail_no_close;
+    }
+
+    if(params_count > INT_MAX) { // argc is int anyways
+        return INT_MAX;
+    }
+
+    return (int)params_count;
+
+    fail:
+    if(close(fd)) {
+        perror("close(prog_source)");
+    }
+    fail_no_close:
+    return -1;
+}
+
+
+int child(const char *path, pid_t ppid) {
     if (prctl(PR_SET_PDEATHSIG, SIGKILL)) {
         perror("prctl");
         exit(127);
     }
 
     // checks if parent died before we set its death signal
-    if (getppid() != emu_pid) {
-        printf("emu process died, exiting\n");
-        exit(127);
+    if (getppid() != ppid) {
+        if(printf("[child] parent process died, exiting\n") == -1) {
+            perror("[child] printf()");
+        }
+        return -1;
     }
 
     // sets parent as the tracer (does not stop the tracee)
     if(ptrace(PTRACE_TRACEME, 0, 0, 0)) {
-        perror("ptrace(PTRACE_TRACEME)");
-        exit(127);
+        perror("[child] ptrace(PTRACE_TRACEME)");
+        return -1;
     }
 
     // allows parent to set ptrace options before execve happens
     if(raise(SIGSTOP)) {
-        printf("raise(SIGSTOP)\n");
-        exit(127);
+        printf("raise(SIGSTOP)\n") {
+            perror("printf()");
+        }
+        return -1;
     }
 
     // executes the program from the file
-    //TODO
-    if(execve(prog, NULL, NULL)) {
+    char * const empty = { NULL }; // empty argv & env
+    if(execve(path, &empty, &empty)) {
         perror("execv()");
-        exit(127);
+        return -1;
     }
 }
 
@@ -163,12 +232,13 @@ void do_print(int x, int y, uint16_t *chars, int n) {
     refresh();
 }
 
-void copy_chars_buffer(int fd, uint16_t *dest, uint16_t *src, int n) {
+int copy_chars_buffer(int fd, uint16_t *dest, uint16_t *src, int n) {
     if(n <= 0 || n > ALIENOS_COLUMNS) {
-        exit(127);
+        return -1;
     }
     if(pread64(fd, dest, (size_t)n * 2, (uint64_t)src) != (size_t)n * 2) {
-        exit(127);
+        perror("pread(prog_mem)");
+        return -1;
     }
 }
 
@@ -202,7 +272,9 @@ bool do_syscall(pid_t prog_pid, int child_mem, int *exit_code) {
             break;
         case 3:
             //TODO check long/unsigned to signed
-            copy_chars_buffer(child_mem, buffer, (uint16_t *)arg2, (int)arg3);
+            if(copy_chars_buffer(child_mem, buffer, (uint16_t *)arg2, (int)arg3)) {
+                exit(127);
+            }
             do_print((int)arg0, (int)arg1, buffer, (int)arg3);
             break;
         case 4:
@@ -215,7 +287,7 @@ bool do_syscall(pid_t prog_pid, int child_mem, int *exit_code) {
     return false;
 }
 
-void parent(pid_t prog_pid, int *exit_code_ptr) {
+int parent(pid_t cpid, int *exit_code_ptr) {
     // pierwszy wait
     // sprawdzic czy nie ma bledu / zakonczenia dziecka
     // ustawic opcje
@@ -226,52 +298,68 @@ void parent(pid_t prog_pid, int *exit_code_ptr) {
     int wsignal;
     int child_mem;
 
-    char child_mem_path[64];
-    memset(child_mem_path, 0, 64);
-    //TODO error handling
-    snprintf(child_mem_path, 64, "/proc/%d/mem", prog_pid);
+    char mem_path[16];
+    memset(mem_path, 0, 16);
 
-    if(waitpid(prog_pid, &wstatus, 0) == -1) {
-        perror("first waitpid");
-        exit(127);
+    // TODO more handling?
+    if(snprintf(mem_path, 16, "/proc/%d/mem", cpid) < 11) {
+        if(printf("snprintf()\n") == -1) {
+            perror("printf()");
+        }
+        return -1;
+    }
+
+    if(waitpid(cpid, &wstatus, 0) == -1) {
+        perror("waitpid()");
+        return -1;
     }
     if(!WIFSTOPPED(wstatus)) {
-        printf("first WIFSTOPPED\n");
-        exit(127);
+        if(printf("WIFSTOPPED()\n") == -1) {
+            perror("printf");
+        }
+        return -1;
     }
-    if(ptrace(PTRACE_SETOPTIONS, prog_pid, 0, PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACESYSGOOD)) {
-        perror("PTRACE_SETOPTIONS");
-        exit(127);
-    }
+
     wsignal = WSTOPSIG(wstatus);
     if(wsignal != SIGSTOP) {
-        printf("child received unexpected signal\n");
-        exit(127);
+        if(printf("child received unexpected signal\n") == -1) {
+            perror("printf");
+        }
+        return -1;
+    }
+
+    if(ptrace(PTRACE_SETOPTIONS, cpid, 0, PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACESYSGOOD)) {
+        perror("ptrace(PTRACE_SETOPTIONS)");
+        return -1;
     }
 
     while(1) {
-        if(ptrace(PTRACE_CONT, prog_pid, 0, 0)) {
-            perror("PTRACE_CONT");
-            exit(127);
+        if(ptrace(PTRACE_CONT, cpid, 0, 0)) {
+            perror("ptrace(PTRACE_CONT)");
+            return -1;
         }
 
-        if(waitpid(prog_pid, &wstatus, 0) == -1) {
-            perror("preexecve waitpid");
-            exit(127);
+        if(waitpid(cpid, &wstatus, 0) == -1) {
+            perror("waitpid");
+            return -1;
         }
 
         if(!WIFSTOPPED(wstatus)) {
-            printf("first WIFSTOPPED\n");
-            exit(127);
+            if(printf("WIFSTOPPED()\n") == -1) {
+                perror("printf");
+            }
+            return -1;
         }
+
         wsignal = WSTOPSIG(wstatus);
+
+        // TODO czy potrzebne?
         if(wsignal == SIGSTOP) {
             continue;
         }
         if(wsignal == SIGTRAP) {
             if(wstatus >> 8 == (SIGTRAP | PTRACE_EVENT_EXEC << 8)) {
-                //printf("execve caught\n");
-                if((child_mem = open(child_mem_path, O_RDWR | O_LARGEFILE)) == -1) {
+                if((child_mem = open(mem_path, O_RDWR | O_LARGEFILE)) == -1) {
                     exit(127);
                 }
                 break;
@@ -281,10 +369,10 @@ void parent(pid_t prog_pid, int *exit_code_ptr) {
                 exit(127);
             }
             printf("received unexpected SIGTRAP\n");
-            exit(127);
+            return -1;
         }
         printf("received unexpected signal: %s\n", strsignal(wsignal));
-        exit(127);
+        return -1;
     }
 
     bool child_exited = false;
@@ -292,17 +380,17 @@ void parent(pid_t prog_pid, int *exit_code_ptr) {
     while(!child_exited) {
         if(ptrace(PTRACE_SYSEMU, prog_pid, 0, 0)) {
             perror("PTRACE_SYSEMU");
-            exit(127);
+            return -1;
         }
 
         if(waitpid(prog_pid, &wstatus, 0) == -1) {
             perror("postexecve waitpid");
-            exit(127);
+            return -1;
         }
 
         if(!WIFSTOPPED(wstatus)) {
             printf("first WIFSTOPPED\n");
-            exit(127);
+            return -1;
         }
         wsignal = WSTOPSIG(wstatus);
         if(wsignal == (SIGTRAP | 0x80)) {
@@ -312,48 +400,72 @@ void parent(pid_t prog_pid, int *exit_code_ptr) {
 
         if(wstatus >> 8 == (SIGTRAP | PTRACE_EVENT_EXIT << 8)) {
             printf("child exited unexpectedly\n");
-            exit(127);
+            return -1;
         }
 
         printf("received unexpected signal: %s\n", strsignal(wsignal));
-        exit(127);
+        return -1;
     }
 
     // po odpaleniu
 
 }
 
+
+
+
 int main(int argc, char **argv) {
-    if(argc < 2) {
-        printf("Usage: emu program [program_parameters]\n");
-        return 127;
-    }
-    initscr();
-    cbreak();
-    noecho();
-    keypad(stdscr, TRUE);
-    scrollok(stdscr, false);
-    //FIXME
-    wresize(stdscr, ALIENOS_ROWS + 1, ALIENOS_COLUMNS);
-    refresh();
-
-
-    const char *prog = argv[1];
+    const char *prog_path;
+    int params_count;
+    uint64_t params_addr;
     pid_t emu_pid = getpid();
     pid_t prog_pid;
     int exit_code = 127;
+
+    if(argc < 2) {
+        if(printf("Usage: emu program [program_parameters]\n") == -1) {
+            perror("printf");
+        }
+        return 127;
+    }
+
+    prog_path = argv[1];
+
+    if((params_count = find_params(prog_path, &params_addr)) < 0) {
+        return 127;
+    }
 
     switch(prog_pid = fork()) {
         case -1:
             perror("fork()");
             return 127;
         case 0:
-            child(prog, emu_pid);
-            break;
+            if(child(prog_path, emu_pid)) {
+                return 127;
+            }
         default:
-            parent(prog_pid, &exit_code);
+            if(parent(prog_pid, &exit_code) == -1) {
+                return 127;
+            }
     }
 
-    endwin();
     return exit_code;
+
+
+
+    return 0;
+
+
+    initscr();
+    cbreak();
+    noecho();
+    keypad(stdscr, TRUE);
+    //FIXME
+    wresize(stdscr, ALIENOS_ROWS + 1, ALIENOS_COLUMNS);
+    refresh();
+
+
+
+    endwin();
+
 }
