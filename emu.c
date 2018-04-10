@@ -1,23 +1,21 @@
 #define _GNU_SOURCE
 #define _LARGEFILE64_SOURCE
-#include <stdio.h>
-#include <wait.h>
-#include <sys/types.h>
-#include <sys/prctl.h>
-#include <sys/user.h>
-#include <sys/ptrace.h>
 #include <asm/ptrace.h>
-#include <unistd.h>
-#include <errno.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <syscall.h>
-#include <ncurses.h>
-#include <fcntl.h>
 #include <elf.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <ncurses.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <syscall.h>
+#include <sys/prctl.h>
+#include <sys/ptrace.h>
+#include <sys/user.h>
+#include <unistd.h>
+#include <wait.h>
 #include "alienos.h"
 
 #define SYS_getrandom 318
@@ -217,8 +215,6 @@ int copy_output_buffer(int fd, uint16_t *dest, uint64_t src_off, int n) {
 
 int do_return(uint64_t return_value, pid_t prog_pid, struct user_regs_struct regs_struct) {
     regs_struct.rax = return_value;
-    //printf("return_value = %llu\n", return_value);
-
     return (int)ptrace(PTRACE_SETREGS, prog_pid, 0, &regs_struct);
 }
 
