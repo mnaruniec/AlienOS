@@ -22,6 +22,7 @@
 
 #define SYS_getrandom 318
 
+
 // Returns maximum number of parameters or -1, fills params_addr
 int find_params(const char *path, uint64_t *params_addr) {
     int fd;
@@ -89,8 +90,8 @@ int find_params(const char *path, uint64_t *params_addr) {
 
 int child(const char *path, pid_t ppid) {
     if (prctl(PR_SET_PDEATHSIG, SIGKILL)) {
-        perror("prctl");
-        exit(127);
+        perror("[child] prctl");
+        return -1;
     }
 
     // checks if parent died before we set its death signal
@@ -109,8 +110,8 @@ int child(const char *path, pid_t ppid) {
 
     // allows parent to set ptrace options before execve happens
     if(raise(SIGSTOP)) {
-        printf("raise(SIGSTOP)\n") {
-            perror("printf()");
+        if(printf("[child] raise(SIGSTOP)\n") == -1) {
+            perror("[child] printf()");
         }
         return -1;
     }
@@ -118,55 +119,42 @@ int child(const char *path, pid_t ppid) {
     // executes the program from the file
     char * const empty = { NULL }; // empty argv & env
     if(execve(path, &empty, &empty)) {
-        perror("execv()");
+        perror("[child] execv()");
         return -1;
     }
+
+    return -1; // not reachable
 }
 
-void do_return(pid_t prog_pid, struct user_regs_struct regs_struct, uint64_t return_value) {
-    regs_struct.rax = return_value;
-    if(ptrace(PTRACE_SETREGS, prog_pid, 0, &regs_struct)) {
-        perror("PTRACE_SETREGS");
-        exit(127);
-    }
-}
-
-// TODO error handling
-uint32_t do_getrand() {
-    uint32_t return_value;
-    if(syscall(SYS_getrandom, &return_value, 4, 0) != 4) {
-        perror("getrandom");
-        exit(127);
-    }
-    //printf("[syscall] getrand, zwracam %d\n", return_value);
-    return return_value;
-}
-
-inline bool is_key_correct(int c) {
+inline bool key_correct(int c) {
     return c >= ALIENOS_ASCII_LOWEST && c <= ALIENOS_ASCII_HIGHEST;
 }
 
-int do_getkey() {
-    //printf("[syscall] getkey, zwracam 0x83(strzalka w prawo)\n");
+int do_getkey(uint64_t *return_value_ptr) {
     int key;
     while(1) {
         switch(key = getch()) {
             case ERR:
-                printf("getkey\n");
-                exit(127);
+                return -1;
             case KEY_RIGHT:
-                return ALIENOS_KEY_RIGHT;
+                *return_value_ptr = ALIENOS_KEY_RIGHT;
+                return 0;
             case KEY_LEFT:
-                return ALIENOS_KEY_LEFT;
+                *return_value_ptr = ALIENOS_KEY_LEFT;
+                return 0;
             case KEY_UP:
-                return ALIENOS_KEY_UP;
+                *return_value_ptr = ALIENOS_KEY_UP;
+                return 0;
             case KEY_DOWN:
-                return ALIENOS_KEY_DOWN;
+                *return_value_ptr = ALIENOS_KEY_DOWN;
+                return 0;
             case KEY_ENTER:
-                return ALIENOS_KEY_ENTER;
+                *return_value_ptr = ALIENOS_KEY_ENTER;
+                return 0;
             default:
-                if(is_key_correct(key)) {
-                    return key;
+                if(key_correct(key)) {
+                    *return_value_ptr = (uint64_t)key;
+                    return 0;
                 }
         }
     }
@@ -174,79 +162,78 @@ int do_getkey() {
 
 
 
-inline void check_coords(int x, int y) {
-    if(x < 0 || x >= ALIENOS_COLUMNS || y < 0 || y >= ALIENOS_ROWS) {
-        printf("check_coords\n");
-        exit(127);
+inline bool coords_correct(int x, int y) {
+    return (x >= 0 && x < ALIENOS_COLUMNS && y >= 0 && y < ALIENOS_ROWS);
+}
+
+chtype get_color(uint16_t achar) {
+    return 0;
+//    static int colors[16] = {0}; // TODO
+//    int index = (achar >> 8) & 0xf;
+//    return colors[index];
+}
+
+int do_setcursor(int x, int y) {
+    return (!coords_correct(x, y) || move(y, x) == ERR || refresh() == ERR) ? -1 : 0;
+}
+
+int get_chtype(chtype *ch, uint16_t achar) {
+    chtype c = (chtype)(achar & 0xff);
+    if(!key_correct((int)c)) {
+        return -1;
     }
+    *ch = c | get_color(achar);
+    return 0;
 }
 
-int get_color(uint16_t achar) {
-    static int colors[16] = {0}; // TODO
-    int index = (achar >> 8) & 0xf;
-    return colors[index];
-}
-
-void do_setcursor(int x, int y) {
-    check_coords(x, y);
-    if(move(y, x) == ERR) {
-        printf("do_setcursor first move\n");
-        exit(127);
-    }
-    //printw("[syscall] setcursor z parametrami: x = %d, y = %d\n", x, y);
-    refresh();
-}
-
-chtype get_printable(uint16_t achar, int i) {
-    int c = achar & 0xff;
-    if(!is_key_correct(c)) {
-        printf("got achar: %x, c: %x, i: %d", (uint32_t)achar, c, i);
-        printf("get_printable\n");
-        exit(127);
-    }
-    return (chtype)(c | get_color(achar));
-}
-
-void do_print(int x, int y, uint16_t *chars, int n) {
-    check_coords(x, y);
-    check_coords(x + n - 1, y);
+int do_print(int x, int y, uint16_t *achars, int n) {
     int i, old_x, old_y;
+    chtype ch;
+
     getyx(stdscr, old_y, old_x);
-    if(move(y, x) == ERR) {
-        printf("do_print first move\n");
-        exit(127);
+
+    if(!coords_correct(x, y) || !coords_correct(x + n - 1, y) || move(y, x) == ERR) {
+        return -1;
     }
+
     for(i = 0; i < n; ++i) {
-        if(addch(get_printable(chars[i], i)) == ERR) {
-            printf("do_print addch\n");
-            exit(127);
+        if(get_chtype(&ch, achars[i]) || (addch(ch) == ERR)) {
+            return -1;
         }
     }
 
-    if(move(old_y, old_x) == ERR) {
-        printf("do_print last move\n");
-        exit(127);
-    }
-    //printw("[syscall] print z parametrami: x = %d, y = %d, chars = %p, n = %d\n", x, y, chars, n);
-    //TODO refresh error handling
-    refresh();
-}
-
-int copy_chars_buffer(int fd, uint16_t *dest, uint16_t *src, int n) {
-    if(n <= 0 || n > ALIENOS_COLUMNS) {
+    if(move(old_y, old_x) == ERR || refresh() == ERR) {
         return -1;
     }
-    if(pread64(fd, dest, (size_t)n * 2, (uint64_t)src) != (size_t)n * 2) {
-        perror("pread(prog_mem)");
-        return -1;
-    }
+
+    return 0;
 }
 
-bool do_syscall(pid_t prog_pid, int child_mem, int *exit_code) {
-    struct user_regs_struct regs_struct;
-    if(ptrace(PTRACE_GETREGS, prog_pid, 0, &regs_struct)) {
-        perror("PTRACE_GETREGS");
-        exit(127);
+int copy_output_buffer(int fd, uint16_t *dest, uint64_t src_off, int n) {
+    return (n <= 0 || n > ALIENOS_COLUMNS
+            || pread64(fd, dest, (size_t)n * 2, src_off) != (size_t)n * 2)
+            ? -1 : 0;
+}
+
+int do_return(uint64_t return_value, pid_t prog_pid, struct user_regs_struct regs_struct) {
+    regs_struct.rax = return_value;
+    //printf("return_value = %llu\n", return_value);
+
+    return (int)ptrace(PTRACE_SETREGS, prog_pid, 0, &regs_struct);
+}
+
+int do_getrand(uint64_t *return_value_ptr) {
+    return (syscall(SYS_getrandom, return_value_ptr, 4, 0) != 4) ? -1 : 0;
+}
+
+// returns 1 if child called end, -1 if there was an error, 0 otherwise
+int do_syscall(int *exit_code_ptr, pid_t cpid, int child_mem) {
+
+    static uint16_t output_buffer[ALIENOS_COLUMNS];
+    static struct user_regs_struct regs_struct;
+
+    if(ptrace(PTRACE_GETREGS, cpid, 0, &regs_struct)) {
+        return -1;
     }
 
     uint64_t syscall_number = regs_struct.orig_rax,
@@ -256,159 +243,193 @@ bool do_syscall(pid_t prog_pid, int child_mem, int *exit_code) {
              arg3 = regs_struct.r10,
              return_value;
 
-    uint16_t buffer[ALIENOS_COLUMNS];
-
     switch (syscall_number) {
+
         case 0: // end
-            *exit_code = (int)arg0;
-            return true;
-        case 1:
-            return_value = (uint64_t)do_getrand();
-            do_return(prog_pid, regs_struct, return_value);
-            break;
-        case 2:
-            return_value = (uint64_t)do_getkey();
-            do_return(prog_pid, regs_struct, return_value);
-            break;
-        case 3:
-            //TODO check long/unsigned to signed
-            if(copy_chars_buffer(child_mem, buffer, (uint16_t *)arg2, (int)arg3)) {
-                exit(127);
-            }
-            do_print((int)arg0, (int)arg1, buffer, (int)arg3);
-            break;
+            *exit_code_ptr = (int)arg0;
+            return 1;
+
+        case 1: // getrand
+
+            return (do_getrand(&return_value)
+                    || do_return(return_value, cpid, regs_struct)) ? -1 : 0;
+
+        case 2: // getkey
+            return (do_getkey(&return_value)
+                    || do_return(return_value, cpid, regs_struct)) ? -1 : 0;
+
+        case 3: // print
+            return
+                (copy_output_buffer(child_mem, output_buffer, arg2, (int)arg3)
+                 || do_print((int)arg0, (int)arg1, output_buffer, (int)arg3))
+                 ? -1 : 0;
+
         case 4:
-            do_setcursor((int)arg0, (int)arg1);
-            break;
-        default:
-            printf("invalid syscall invoked: %lld\n", regs_struct.orig_rax);
-            exit(127);
+            return do_setcursor((int)arg0, (int)arg1);
+
+        default: // invalid syscall number
+            return -1;
     }
-    return false;
 }
 
-int parent(pid_t cpid, int *exit_code_ptr) {
-    // pierwszy wait
-    // sprawdzic czy nie ma bledu / zakonczenia dziecka
-    // ustawic opcje
-    // robic wait az do execve event, przechwytujac SIGSTOP (czy tylko ???)
-    // jak dostaniemy execve event, przejsc do petli emulujacej
+int inject_params(int child_mem, int arg_count, char **args, uint64_t params_addr) {
+    int i;
+    long long int arg;
+    uint64_t dest_off = params_addr;
 
+    for(i = 0; i < arg_count; ++i, dest_off += 4) {
+        if((arg = strtoll(args[i], NULL, 10)) < INT32_MIN || arg > INT32_MAX) {
+            if(printf("argument number %d is not a 32-bit int\n", i) == -1) {
+                perror("printf()");
+                return -1;
+            }
+        }
+
+        if(pwrite64(child_mem, &arg, 4, dest_off) != 4) {
+            if(printf("pwrite(child_mem)\n") == -1) {
+                perror("printf()");
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+int parent(int *exit_code_ptr, pid_t cpid, int arg_count, char **args, uint64_t params_addr) {
     int wstatus;
     int wsignal;
     int child_mem;
+    int syscall_status;
 
     char mem_path[16];
     memset(mem_path, 0, 16);
 
-    // TODO more handling?
     if(snprintf(mem_path, 16, "/proc/%d/mem", cpid) < 11) {
         if(printf("snprintf()\n") == -1) {
             perror("printf()");
         }
-        return -1;
+        goto fail_no_close;
     }
 
-    if(waitpid(cpid, &wstatus, 0) == -1) {
+    if(waitpid(cpid, &wstatus, 0) != cpid) {
         perror("waitpid()");
-        return -1;
-    }
-    if(!WIFSTOPPED(wstatus)) {
-        if(printf("WIFSTOPPED()\n") == -1) {
-            perror("printf");
-        }
-        return -1;
+        goto fail_no_close;
     }
 
+    if(!WIFSTOPPED(wstatus)) {
+        if(printf("child died before raising sigstop\n") == -1) {
+            perror("printf()");
+        }
+        goto fail_no_close;
+    }
     wsignal = WSTOPSIG(wstatus);
+
+    // we expect exactly one SIGSTOP that child raises
     if(wsignal != SIGSTOP) {
         if(printf("child received unexpected signal\n") == -1) {
-            perror("printf");
+            perror("printf()");
         }
-        return -1;
+        goto fail_no_close;
     }
 
     if(ptrace(PTRACE_SETOPTIONS, cpid, 0, PTRACE_O_TRACEEXEC | PTRACE_O_TRACEEXIT | PTRACE_O_TRACESYSGOOD)) {
         perror("ptrace(PTRACE_SETOPTIONS)");
-        return -1;
+        goto fail_no_close;
+    }
+
+    if(ptrace(PTRACE_CONT, cpid, 0, 0)) {
+        perror("ptrace(PTRACE_CONT)");
+        goto fail_no_close;
+    }
+
+    if(waitpid(cpid, &wstatus, 0) != cpid) {
+        perror("waitpid()");
+        goto fail_no_close;
+    }
+
+    if(!WIFSTOPPED(wstatus)) {
+        if(printf("WIFSTOPPED()\n") == -1) {
+            perror("printf()");
+        }
+        goto fail_no_close;
+    }
+    wsignal = WSTOPSIG(wstatus);
+
+    // we expect exactly exec event
+    if(wsignal == SIGTRAP) {
+        if(wstatus >> 8 == (SIGTRAP | PTRACE_EVENT_EXEC << 8)) {
+
+            if((child_mem = open(mem_path, O_RDWR | O_LARGEFILE)) == -1) {
+                perror("open(prog_mem)");
+                goto fail_no_close;
+            }
+
+            if(inject_params(child_mem, arg_count, args, params_addr)) {
+                goto fail;
+            }
+        }
+        else if(wstatus >> 8 == (SIGTRAP | PTRACE_EVENT_EXIT << 8)) {
+            if(printf("child exited unexpectedly before execve\n") == -1) {
+                perror("printf()");
+            }
+            goto fail_no_close;
+        }
+        else {
+            if(printf("received unexpected SIGTRAP\n") == -1) {
+                perror("printf()");
+            }
+            goto fail_no_close;
+        }
+    }
+    else {
+        if (printf("received unexpected signal: %s\n", strsignal(wsignal)) == -1) {
+            perror("printf()");
+        }
+        goto fail_no_close;
+    }
+
+    initscr(); // on error calls exit, unfortunately we cannot pass exit code
+
+    // we need one additional row so that addch in bottom-right field does not return error
+    if(cbreak() == ERR || noecho() == ERR || keypad(stdscr, TRUE) == ERR
+       || wresize(stdscr, ALIENOS_ROWS + 1, ALIENOS_COLUMNS) == ERR || refresh() == ERR) {
+        goto fail;
     }
 
     while(1) {
-        if(ptrace(PTRACE_CONT, cpid, 0, 0)) {
-            perror("ptrace(PTRACE_CONT)");
-            return -1;
+        if(ptrace(PTRACE_SYSEMU, cpid, 0, 0) || (waitpid(cpid, &wstatus, 0) != cpid) || !WIFSTOPPED(wstatus)) {
+            goto fail;
         }
-
-        if(waitpid(cpid, &wstatus, 0) == -1) {
-            perror("waitpid");
-            return -1;
-        }
-
-        if(!WIFSTOPPED(wstatus)) {
-            if(printf("WIFSTOPPED()\n") == -1) {
-                perror("printf");
-            }
-            return -1;
-        }
-
         wsignal = WSTOPSIG(wstatus);
 
-        // TODO czy potrzebne?
-        if(wsignal == SIGSTOP) {
-            continue;
-        }
-        if(wsignal == SIGTRAP) {
-            if(wstatus >> 8 == (SIGTRAP | PTRACE_EVENT_EXEC << 8)) {
-                if((child_mem = open(mem_path, O_RDWR | O_LARGEFILE)) == -1) {
-                    exit(127);
-                }
+        // child in syscall-stop
+        if(wsignal == (SIGTRAP | 0x80)) {
+            syscall_status = do_syscall(exit_code_ptr, cpid, child_mem);
+            if(syscall_status == 1) {
                 break;
             }
-            if(wstatus >> 8 == (SIGTRAP | PTRACE_EVENT_EXIT << 8)) {
-                printf("child exited unexpectedly\n");
-                exit(127);
+            else if(!syscall_status) {
+                continue;
             }
-            printf("received unexpected SIGTRAP\n");
-            return -1;
         }
-        printf("received unexpected signal: %s\n", strsignal(wsignal));
-        return -1;
+        // unexpected exit, signal or syscall error
+        goto fail;
     }
 
-    bool child_exited = false;
-
-    while(!child_exited) {
-        if(ptrace(PTRACE_SYSEMU, prog_pid, 0, 0)) {
-            perror("PTRACE_SYSEMU");
-            return -1;
-        }
-
-        if(waitpid(prog_pid, &wstatus, 0) == -1) {
-            perror("postexecve waitpid");
-            return -1;
-        }
-
-        if(!WIFSTOPPED(wstatus)) {
-            printf("first WIFSTOPPED\n");
-            return -1;
-        }
-        wsignal = WSTOPSIG(wstatus);
-        if(wsignal == (SIGTRAP | 0x80)) {
-            child_exited = do_syscall(prog_pid, child_mem, exit_code_ptr);
-            continue;
-        }
-
-        if(wstatus >> 8 == (SIGTRAP | PTRACE_EVENT_EXIT << 8)) {
-            printf("child exited unexpectedly\n");
-            return -1;
-        }
-
-        printf("received unexpected signal: %s\n", strsignal(wsignal));
-        return -1;
+    endwin();
+    if(close(child_mem)) {
+        perror("close(prog_mem)");
     }
 
-    // po odpaleniu
+    return 0;
 
+    fail:
+        endwin();
+        if(close(child_mem)) {
+            perror("close(prog_mem)");
+        }
+    fail_no_close:
+        return -1;
 }
 
 
@@ -420,6 +441,7 @@ int main(int argc, char **argv) {
     uint64_t params_addr;
     pid_t emu_pid = getpid();
     pid_t prog_pid;
+    int arg_count;
     int exit_code = 127;
 
     if(argc < 2) {
@@ -435,6 +457,9 @@ int main(int argc, char **argv) {
         return 127;
     }
 
+    arg_count = (params_count < (argc - 2)) ? params_count : (argc - 2);
+
+
     switch(prog_pid = fork()) {
         case -1:
             perror("fork()");
@@ -444,28 +469,10 @@ int main(int argc, char **argv) {
                 return 127;
             }
         default:
-            if(parent(prog_pid, &exit_code) == -1) {
+            if(parent(&exit_code, prog_pid, arg_count, (argv + 2), params_addr) == -1) {
                 return 127;
             }
     }
 
     return exit_code;
-
-
-
-    return 0;
-
-
-    initscr();
-    cbreak();
-    noecho();
-    keypad(stdscr, TRUE);
-    //FIXME
-    wresize(stdscr, ALIENOS_ROWS + 1, ALIENOS_COLUMNS);
-    refresh();
-
-
-
-    endwin();
-
 }
