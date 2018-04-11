@@ -90,6 +90,7 @@ static int do_getkey(uint64_t *return_value_ptr) {
                 *return_value_ptr = ALIENOS_KEY_DOWN;
                 return 0;
             case KEY_ENTER:
+            case 10:
                 *return_value_ptr = ALIENOS_KEY_ENTER;
                 return 0;
             default:
