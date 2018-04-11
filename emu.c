@@ -1,6 +1,5 @@
 #define _GNU_SOURCE
 #define _LARGEFILE64_SOURCE
-#include <asm/ptrace.h>
 #include <elf.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -17,8 +16,13 @@
 #include <unistd.h>
 #include <wait.h>
 #include "alienos.h"
+#include <asm/ptrace.h>
+
 
 #define SYS_getrandom 318
+
+// 0 - no colors, 1 - limited colors, 2 - full colors
+int color_level = 0;
 
 
 // Returns maximum number of parameters or -1, fills params_addr
@@ -124,7 +128,7 @@ int child(const char *path, pid_t ppid) {
     return -1; // not reachable
 }
 
-inline bool key_correct(int c) {
+static inline bool key_correct(int c) {
     return c >= ALIENOS_ASCII_LOWEST && c <= ALIENOS_ASCII_HIGHEST;
 }
 
@@ -160,15 +164,20 @@ int do_getkey(uint64_t *return_value_ptr) {
 
 
 
-inline bool coords_correct(int x, int y) {
+static inline bool coords_correct(int x, int y) {
     return (x >= 0 && x < ALIENOS_COLUMNS && y >= 0 && y < ALIENOS_ROWS);
 }
 
-chtype get_color(uint16_t achar) {
-    return 0;
-//    static int colors[16] = {0}; // TODO
-//    int index = (achar >> 8) & 0xf;
-//    return colors[index];
+int get_color(chtype *color, uint16_t achar) {
+    int color_id = 0;
+
+    if(color_level) {
+        color_id = (achar >> 8) & 0xf;
+        color_id += 1;
+    }
+
+    *color = COLOR_PAIR(color_id);
+    return (color_id == ERR) ? -1 : 0;
 }
 
 int do_setcursor(int x, int y) {
@@ -177,10 +186,13 @@ int do_setcursor(int x, int y) {
 
 int get_chtype(chtype *ch, uint16_t achar) {
     chtype c = (chtype)(achar & 0xff);
-    if(!key_correct((int)c)) {
+    chtype color;
+
+    if((!key_correct((int)c)) || get_color(&color, achar)) {
         return -1;
     }
-    *ch = c | get_color(achar);
+
+    *ch = c | color;
     return 0;
 }
 
@@ -291,6 +303,99 @@ int inject_params(int child_mem, int arg_count, char **args, uint64_t params_add
     return 0;
 }
 
+int init_colors() {
+    short i;
+
+    if(start_color() == ERR) {
+        return -1;
+    }
+
+    if(!has_colors() || COLOR_PAIRS < 9 || COLORS < 7) { // no colors
+        return 0;
+    }
+
+    if(!can_change_color() || COLOR_PAIRS < 18 || COLORS < 16) { // limited colors
+        short fg[16] = {
+            COLOR_BLACK,
+            COLOR_BLUE,
+            COLOR_GREEN,
+            COLOR_CYAN,
+            COLOR_RED,
+            COLOR_MAGENTA,
+            COLOR_YELLOW,
+            COLOR_WHITE, // light gray
+            COLOR_WHITE, // dark gray
+            COLOR_BLUE, // light ...
+            COLOR_GREEN,
+            COLOR_CYAN,
+            COLOR_RED,
+            COLOR_MAGENTA,
+            COLOR_YELLOW,
+            COLOR_WHITE,
+        };
+
+        for(i = 0; i < 16; ++i) {
+            if (init_pair(i + (short)1, fg[i], COLOR_BLACK) == ERR) {
+                return -1;
+            }
+        }
+        return 1;
+    }
+
+    short rgb[16][3] = {
+        {0, 0, 0}, // black
+        {0, 0, 500}, // blue
+        {0, 650, 0}, // green
+        {0, 500, 500}, // cyan
+        {600, 0, 0}, // red
+        {700, 0, 700}, // pink
+        {700, 700, 0}, // yellow
+        {750, 750, 750}, // light gray
+        {500, 500, 500}, // dark gray
+        {0, 0, 1000}, // light blue
+        {0, 1000, 0}, // light green
+        {0, 1000, 1000}, // light cyan
+        {1000, 0, 0}, // light red
+        {1000, 191, 1000}, // light pink
+        {1000, 1000, 0}, // light yellow
+        {1000, 1000, 1000}, // white
+    };
+
+    for(i = 0; i < 16; ++i) {
+        if(init_color(i, rgb[i][0], rgb[i][1], rgb[i][2]) == ERR) {
+            return -1;
+        }
+    }
+
+    for(i = 0; i < 16; ++i) {
+        if (init_pair(i + (short)1, i, 0) == ERR) {
+            return -1;
+        }
+    }
+
+    return 2;
+}
+
+void test_colors() {
+    printw("colors = %d, color_pairs = %d\n", COLORS, COLOR_PAIRS);
+    refresh();
+    //while(1) {};
+    uint16_t achars[16] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+    uint16_t level = '0' + color_level;
+
+    do_print(0, 0, &level, 1);
+
+    int i;
+    for(i = 0; i < 16; ++i) {
+        achars[i] |= (i << 8);
+    }
+
+    do_print(0, 1, achars, 16);
+
+    while(1) {}
+}
+
+
 int parent(int *exit_code_ptr, pid_t cpid, int arg_count, char **args, uint64_t params_addr) {
     int wstatus;
     int wsignal;
@@ -387,10 +492,16 @@ int parent(int *exit_code_ptr, pid_t cpid, int arg_count, char **args, uint64_t 
     initscr(); // on error calls exit, unfortunately we cannot pass exit code
 
     // we need one additional row so that addch in bottom-right field does not return error
-    if(cbreak() == ERR || noecho() == ERR || keypad(stdscr, TRUE) == ERR
-       || wresize(stdscr, ALIENOS_ROWS + 1, ALIENOS_COLUMNS) == ERR || refresh() == ERR) {
+    if(cbreak() == ERR
+       || noecho() == ERR
+       || keypad(stdscr, TRUE) == ERR
+       || wresize(stdscr, ALIENOS_ROWS + 1, ALIENOS_COLUMNS) == ERR
+       || (color_level = init_colors()) == -1
+       || refresh() == ERR) {
         goto fail;
     }
+
+    //test_colors();// TODO remove
 
     while(1) {
         if(ptrace(PTRACE_SYSEMU, cpid, 0, 0) || (waitpid(cpid, &wstatus, 0) != cpid) || !WIFSTOPPED(wstatus)) {
