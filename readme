@@ -1,0 +1,10 @@
+Autor: Michał Naruniec (mn360386)
+
+Rozwiązanie korzysta z biblioteki ncurses i systemu budowania make, które powinny być już zainstalowane na maszynie. Kompilacja jest wywoływana przez polecenie make bez wyspecyfikowanego targetu.
+
+Jako że emulator korzysta z wywołania execve do uruchomienia programu, uruchamiający użytkownik powinien mieć uprawnienia do wykonywania kodu.
+
+Z powodu braku wymagań w zadaniu odnośnie m.in. obsługi sygnałów, przyjąłem że każdy niespodziewany sygnał do dziecka emulatora powoduje zakończenie się z kodem 127. Jakikolwiek błąd w wywołaniu systemowym (a także niepełny zapis) również mają ten efekt.
+
+Kolory na terminalu w zależności od dostępnych opcji mogą mieć 3 tryby - 1, 8 bądź 16 różnych kolorów. Program nie sprawdza, czy użytkownik go uruchamia w konsoli o rozmiarach przekraczających rozmiary terminali kosmitów.
+
